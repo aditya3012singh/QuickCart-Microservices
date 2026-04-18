@@ -1,0 +1,78 @@
+version: "3.9"
+
+services:
+  product-db:
+    image: postgres:15
+    container_name: product-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: productdb
+    ports:
+      - "5432:5432"
+
+  order-db:
+    image: postgres:15
+    container_name: order-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orderdb
+    ports:
+      - "5433:5432"
+
+  user-db:
+    image: postgres:15
+    container_name: user-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: userdb
+    ports:
+      - "5434:5432"
+
+  user-service:
+    build: ./user-service
+    container_name: user-service
+    environment:
+      - JWT_SECRET:supersecret
+    depends_on:
+      - user-db
+
+  product-service:
+    build: ./product-service
+    container_name: product-service
+    depends_on:
+      - product-db
+      - rabbitmq
+    environment:
+      - JWT_SECRET=supersecret
+
+  order-service:
+    build: ./order-service
+    container_name: order-service
+    depends_on:
+      - product-service
+      - order-db
+      - rabbitmq
+    environment:
+      - JWT_SECRET=supersecret
+
+  gateway:
+    image: nginx
+    ports:
+      - "8080:80" 
+    container_name: gateway
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - user-service
+      - product-service
+      - order-service
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"

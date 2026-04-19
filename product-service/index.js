@@ -2,8 +2,9 @@ const express = require("express");
 const app = express();
 const { pool, connectWithRetry } = require("./db");
 const { createProductSchema, updateStockSchema } = require("./schema");
-const authMiddleware = require("./authMiddleware");
-const amqp = require("amqplib");
+const authMiddleware = require("./middleware/authMiddleware");
+const { initConsumer, successCount, failureCount } = require("./events/consumer");
+
 app.use(express.json());
 
 (async () => {
@@ -19,72 +20,10 @@ app.use(express.json());
   `);
 
   // 🔥 Start RabbitMQ AFTER DB is ready
-  consumeEvents().catch(err => {
-    console.error("❌ Consumer failed", err);
-    });
-
+  await initConsumer();
 })();
 
-const SECRET = process.env.JWT_SECRET || "supersecret"; 
-
-async function connectRabbit(retries = 15) {
-  while (retries) {
-    try {
-      const conn = await amqp.connect("amqp://rabbitmq");
-      console.log("✅ Connected to RabbitMQ");
-      return conn;
-    } catch {
-      console.log("❌ RabbitMQ not ready, retrying...");
-      retries--;
-      await new Promise(res => setTimeout(res, 2000));
-    }
-  }
-  process.exit(1);
-}
-
-async function consumeEvents() {
-  const conn = await connectRabbit(); // 👈 HERE
-  const channel = await conn.createChannel();
-
-  await channel.assertQueue("order_created", { durable: true });
-
-  channel.prefetch(1);
-
-  console.log("📡 RabbitMQ channel ready");
-
-  channel.consume("order_created", async (msg) => {
-    const { productId, quantity } = JSON.parse(msg.content);
-
-    console.log("📥 Event received:", productId, quantity);
-
-    // update DB
-    try {
-    const result = await pool.query(
-        `UPDATE products 
-        SET stock = stock - $1 
-        WHERE id = $2 AND stock >= $1
-        RETURNING *`,
-        [quantity, productId]
-    );
-
-    if (result.rows.length === 0) {
-        console.log("❌ Not enough stock or product not found");
-        
-        // 🔥 IMPORTANT: still ack OR design retry logic depending on business
-        channel.ack(msg); 
-        return;
-    }
-
-    console.log("✅ Stock updated");
-
-    channel.ack(msg);
-
-    } catch (err) {
-    console.error("❌ Failed processing event");
-    // ❌ don't ack → retry
-    }
-  });
-}
+const SECRET = process.env.JWT_SECRET || "supersecret";
 
 /**
  * Create Product
@@ -123,6 +62,16 @@ app.get("/", async (req, res) => {
  */
 app.get("/health", (req, res) => {
   res.send("Product service is running");
+});
+
+/**
+ * Metrics endpoint
+ */
+app.get("/metrics", (req, res) => {
+  res.json({
+    successCount,
+    failureCount
+  });
 });
 
 /**

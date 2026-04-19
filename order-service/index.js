@@ -1,11 +1,10 @@
 const express = require("express");
-const authMiddleware = require("./authMiddleware");
-const amqp = require("amqplib");
+const authMiddleware = require("./middleware/authMiddleware");
 const app = express();
 const { pool, connectWithRetry } = require("./db");
-app.use(express.json());
+const { initPublisher, publishEvent, consumeOrderEvents } = require("./events/publisher");
 
-let channel;
+app.use(express.json());
 
 (async () => {
   await connectWithRetry();
@@ -20,49 +19,14 @@ let channel;
     )
   `);
 
-  const conn = await connectRabbit();
-  channel = await conn.createChannel();
-
-  await channel.assertQueue("order_created", { durable: true });
-
-  console.log("📡 RabbitMQ channel ready");
+  await initPublisher();
+  consumeOrderEvents();
 })();
 
 // 🔗 Product Service URL (important for Docker later)
 const PRODUCT_SERVICE_URL = "http://product-service:3002";
 
-const SECRET = process.env.JWT_SECRET || "supersecret"; 
-
-async function connectRabbit(retries = 15) {
-  while (retries) {
-    try {
-      const conn = await amqp.connect("amqp://rabbitmq");
-      console.log("✅ Connected to RabbitMQ");
-      return conn;
-    } catch {
-      console.log("❌ RabbitMQ not ready, retrying...");
-      retries--;
-      await new Promise(res => setTimeout(res, 2000));
-    }
-  }
-  process.exit(1);
-}
-
-async function publishEvent(event) {
-  if (!channel) {
-    return res.status(500).json({
-        error: "Event system not ready"
-    });
-  }
-
-  channel.sendToQueue(
-    "order_created",
-    Buffer.from(JSON.stringify(event)),
-    { persistent: true }
-  );
-
-  console.log("📤 Event published:", event);
-}
+const SECRET = process.env.JWT_SECRET || "supersecret";
 
 /**
  * Create Order
@@ -80,16 +44,35 @@ app.post("/", authMiddleware, async (req, res) => {
     );
 
     const order = result.rows[0];
+    const correlationId = `order-${order.id}`;
 
-    if (!channel) {
-      return res.status(500).json({ error: "Event system not ready" });
-    }
-
-    await publishEvent({
+    console.log(JSON.stringify({
+      service: "order-service",
+      event: "order_created",
       orderId: order.id,
-      productId,
-      quantity
-    });
+      correlationId,
+      status: "pending",
+      timestamp: new Date().toISOString()
+    }));
+
+    try {
+      publishEvent({
+        orderId: order.id,
+        productId,
+        quantity,
+        correlationId
+      });
+    } catch (err) {
+      console.error(JSON.stringify({
+        service: "order-service",
+        event: "publish_failed",
+        orderId: order.id,
+        correlationId,
+        error: err.message,
+        timestamp: new Date().toISOString()
+      }));
+      return res.status(500).json({ error: "Event failed" });
+    }
 
     res.json(order);
 

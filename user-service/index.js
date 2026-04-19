@@ -1,10 +1,13 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const authMiddleware = require("./authMiddleware");
+const client = require("prom-client");
+const authMiddleware = require("./middleware/authMiddleware");
 const { pool, connectWithRetry } = require("./db");
 
 const app = express();
+
+client.collectDefaultMetrics();
 
 app.use(express.json());
 
@@ -91,19 +94,38 @@ app.get("/profile", authMiddleware, async (req, res) => {
 });
 
 // Get user
-app.get("/users/:id", (req, res) => {
-  const user = users.find(u => u.id === req.params.id);
+app.get("/users/:id", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
 
-  if (!user) {
-    return res.status(404).json({ error: "User not found" });
+  if (Number.isNaN(userId)) {
+    return res.status(400).json({ error: "Invalid user id" });
   }
 
-  res.json(user);
+  try {
+    const result = await pool.query(
+      "SELECT id, email, created_at FROM users WHERE id = $1",
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load user" });
+  }
 });
 
 // Health check (VERY IMPORTANT in microservices)
 app.get("/health", (req, res) => {
   res.send("User service is running");
+});
+
+app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", client.register.contentType);
+  res.end(await client.register.metrics());
 });
 
 app.listen(3001, () => {
